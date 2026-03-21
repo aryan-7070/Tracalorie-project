@@ -1,0 +1,27 @@
+# Auto detect text files and normalize line endings to LF
+* text=auto
+
+# JavaScript
+*.js text eol=lf
+*.jsx text eol=lf
+*.json text eol=lf
+
+# CSS
+*.css text eol=lf
+*.scss text eol=lf
+
+# HTML
+*.html text eol=lf
+
+# Markdown
+*.md text eol=lf
+
+# SQL
+*.sql text eol=lf
+
+# Shell
+*.sh text eol=lf
+
+# Windows
+*.bat text eol=crlf
+*.cmd text eol=crlf
