@@ -5,6 +5,8 @@ import '../styles/AuthPage.css';
 export default function AuthPage({ onSuccess }) {
   const [mode, setMode] = useState('login');
   const [username, setUsername] = useState('');
+  const [email, setEmail] = useState('');
+  const [displayName, setDisplayName] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState(null);
   const [successMsg, setSuccessMsg] = useState(null);
@@ -21,16 +23,27 @@ export default function AuthPage({ onSuccess }) {
     setError(null);
     setSuccessMsg(null);
     setUsername('');
+    setEmail('');
     setPassword('');
     setMode(newMode);
   };
 
-  const validatePassword = (password) => {
-    const regex =
-      /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/;
-
-    if (!regex.test(password)) {
-      return "Password must be at least 8 characters long and include uppercase, lowercase, number, and special character.";
+  /**
+   * Client-side policy check.
+   *
+   * This exists purely for fast feedback. The server enforces the same rules (and
+   * more) authoritatively — duplicating them here is a usability feature, never a
+   * security control. Keeping that comment honest matters: the moment someone
+   * treats this as the gate, the server-side check gets dropped.
+   */
+  const validatePassword = (value) => {
+    if (value.length < 12) {
+      return 'Password must be at least 12 characters long.';
+    }
+    if (value.length > 72) {
+      // bcrypt only hashes the first 72 bytes; the server rejects longer input
+      // rather than silently truncating.
+      return 'Password must be at most 72 characters long.';
     }
     return null;
   };
@@ -39,26 +52,35 @@ export default function AuthPage({ onSuccess }) {
     event.preventDefault();
     setError(null);
     setSuccessMsg(null);
-    
-    //  Validating password only during register (or both if you want)
-    const passwordError = validatePassword(password);
-    if (!isLogin && passwordError) {
-      setError(passwordError);
-      return;
+
+    if (!isLogin) {
+      const passwordError = validatePassword(password);
+      if (passwordError) {
+        setError(passwordError);
+        return;
+      }
     }
+
     setLoading(true);
 
     try {
       if (isLogin) {
+        // No token is returned or stored: the server sets an httpOnly cookie and
+        // we hand the user object straight up.
         const response = await login(username, password);
-        onSuccess(response.token, response.user);
+        onSuccess(response.user);
       } else {
-        await register(username, password);
+        await register({ username, password, email, displayName });
         setSuccessMsg('Account created! Please log in.');
         switchMode('login');
       }
     } catch (err) {
-      setError(err?.message || 'Something went wrong');
+      // Surface the server's field-level reasons when it sends them.
+      if (err?.details?.length) {
+        setError(err.details.map((d) => `${d.path}: ${d.message}`).join(' · '));
+      } else {
+        setError(err?.message || 'Something went wrong');
+      }
     } finally {
       setLoading(false);
     }
@@ -169,11 +191,58 @@ export default function AuthPage({ onSuccess }) {
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   required
+                  minLength={isLogin ? 1 : 3}
+                  maxLength={isLogin ? 254 : 32}
                   autoFocus
                   autoComplete="username"
+                  // Credentials, not arbitrary text: stops a password manager
+                  // from offering to save the username as if it were a login.
+                  name="username"
                 />
               </div>
             </div>
+
+            {!isLogin && (
+              <>
+                <div className="auth-field">
+                  <label className="auth-label" htmlFor="email">
+                    Email <span className="auth-optional">(optional)</span>
+                  </label>
+                  <div className="auth-input-wrap">
+                    <input
+                      id="email"
+                      type="email"
+                      className="auth-input"
+                      placeholder="you@example.com"
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      maxLength={254}
+                      autoComplete="email"
+                      name="email"
+                    />
+                  </div>
+                </div>
+
+                <div className="auth-field">
+                  <label className="auth-label" htmlFor="displayName">
+                    Display name <span className="auth-optional">(optional)</span>
+                  </label>
+                  <div className="auth-input-wrap">
+                    <input
+                      id="displayName"
+                      type="text"
+                      className="auth-input"
+                      placeholder="How should we greet you?"
+                      value={displayName}
+                      onChange={(e) => setDisplayName(e.target.value)}
+                      maxLength={64}
+                      autoComplete="nickname"
+                      name="nickname"
+                    />
+                  </div>
+                </div>
+              </>
+            )}
 
             <div className="auth-field">
               <label className="auth-label" htmlFor="password">Password</label>
@@ -186,9 +255,15 @@ export default function AuthPage({ onSuccess }) {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   required
-                  pattern="^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&]).{8,}$"
-                  title="At least 8 chars, 1 uppercase, 1 lowercase, 1 number, 1 special char"
+                  minLength={isLogin ? 1 : 12}
+                  maxLength={isLogin ? 256 : 72}
+                  title={
+                    isLogin
+                      ? undefined
+                      : 'At least 12 characters. Avoid common or reused passwords.'
+                  }
                   autoComplete={isLogin ? 'current-password' : 'new-password'}
+                  name="password"
                 />
               </div>
             </div>

@@ -36,5 +36,8 @@ Thumbs.db
 coverage/
 .nyc_output/
 
+# Runtime data (audit records live in Postgres, not on disk)
+audit.json
+
 # Misc
 .qodo/

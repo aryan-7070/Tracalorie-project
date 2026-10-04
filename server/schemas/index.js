@@ -1,0 +1,214 @@
+'use strict';
+
+/**
+ * Request schemas.
+ *
+ * Every value crossing the trust boundary is described here. Rules that exist
+ * only in the client are duplicated here deliberately: client validation is a
+ * usability feature, this is the control.
+ *
+ * `.strict()` on body schemas rejects unknown keys outright rather than
+ * stripping them, so a client sending `{ role: "admin" }` gets a 422 naming the
+ * offending field instead of silent success.
+ */
+
+const { z } = require('zod');
+const config = require('../config/env');
+
+/** Field names a client must never be able to set directly. */
+const FORBIDDEN_USER_FIELDS = [
+  'id',
+  'role',
+  'is_admin',
+  'token_epoch',
+  'password_hash',
+  'failed_login_count',
+  'locked_until',
+  'status',
+  'created_at',
+];
+
+const username = z
+  .string()
+  .trim()
+  .min(3, 'Username must be at least 3 characters')
+  .max(32, 'Username must be at most 32 characters')
+  // Restrict to characters that are unambiguous in a URL and safe to render
+  // anywhere without escaping. No leading/trailing whitespace after trim.
+  .regex(/^[a-zA-Z0-9._-]+$/, 'Username may only contain letters, numbers, dot, underscore and hyphen')
+  .refine((v) => !/^[._-]/.test(v), 'Username cannot start with a dot, underscore or hyphen');
+
+const email = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .max(254, 'Email must be at most 254 characters') // RFC 5321 maximum
+  .email('Enter a valid email address');
+
+const password = z
+  .string()
+  .min(config.password.minLength, `Password must be at least ${config.password.minLength} characters`)
+  .max(config.password.maxLength, `Password must be at most ${config.password.maxLength} characters`);
+
+const identifier = z
+  .string()
+  .trim()
+  .min(1, 'Enter your username or email')
+  .max(254, 'Identifier is too long');
+
+const entryType = z.enum(['meal', 'workout'], {
+  errorMap: () => ({ message: 'Type must be "meal" or "workout"' }),
+});
+
+// Reject control characters, which are useless in a food name and can corrupt
+// log output or downstream CSV export.
+const itemName = z
+  .string()
+  .trim()
+  .min(1, 'Name is required')
+  .max(200, 'Name must be at most 200 characters')
+  .refine(
+    (v) => !/[\u0000-\u001F\u007F]/.test(v),
+    'Name cannot contain control characters'
+  );
+
+// Negative calories are allowed: workouts are entered as positive "burned"
+// values in this app's model, so negatives are almost always a data-entry
+// error. The database constraint is the final backstop.
+const calories = z
+  .number()
+  .int('Calories must be a whole number')
+  .min(-20000, 'Calories must be at least -20000')
+  .max(20000, 'Calories must be at most 20000');
+
+const isoDate = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be in YYYY-MM-DD format')
+  .refine((v) => !Number.isNaN(Date.parse(`${v}T00:00:00Z`)), 'Enter a valid date');
+
+const uuid = z.string().uuid('Must be a valid identifier');
+
+/** Positive integer id from a path segment. */
+const idParam = z.coerce.number().int().positive().max(2_147_483_647);
+
+const pagination = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  offset: z.coerce.number().int().min(0).max(100_000).default(0),
+});
+
+const register = z
+  .object({
+    username,
+    email: email.optional(),
+    password,
+    displayName: z.string().trim().min(1).max(64).optional(),
+  })
+  .strict();
+
+const login = z
+  .object({
+    // Accepts either username or email; resolved server-side.
+    username: identifier,
+    password: z.string().min(1, 'Password is required').max(config.password.maxLength),
+  })
+  .strict();
+
+const changePassword = z
+  .object({
+    currentPassword: z.string().min(1, 'Current password is required').max(config.password.maxLength),
+    newPassword: password,
+  })
+  .strict();
+
+const updateProfile = z
+  .object({
+    displayName: z.string().trim().min(1).max(64).optional(),
+    email: email.optional(),
+    timezone: z
+      .string()
+      .max(64)
+      .regex(/^[A-Za-z]+(?:\/[A-Za-z0-9_+\-]+)+$/, 'Enter a valid IANA timezone, e.g. Asia/Kolkata')
+      .optional(),
+    units: z.enum(['metric', 'imperial']).optional(),
+  })
+  .strict()
+  .refine((v) => Object.keys(v).length > 0, 'Provide at least one field to update');
+
+const updateLimit = z
+  .object({
+    calorieLimit: z
+      .number()
+      .int('Calorie limit must be a whole number')
+      .min(500, 'Calorie limit must be at least 500')
+      .max(20000, 'Calorie limit must be at most 20000'),
+  })
+  .strict();
+
+const createItem = z
+  .object({
+    type: entryType,
+    name: itemName,
+    calories,
+    // Optional: lets a client backdate an entry using its own timezone rather
+    // than the server's. Server timezone would misattribute late-evening logs.
+    entryDate: isoDate.optional(),
+  })
+  .strict();
+
+const createFood = z
+  .object({
+    type: entryType,
+    name: itemName,
+    calories,
+  })
+  .strict();
+
+const sessionUuidParam = z.object({ id: uuid });
+
+const auditQuery = pagination.extend({
+  days: z.coerce.number().int().min(1).max(365).default(30),
+});
+
+const exportQuery = z.object({
+  format: z.enum(['json', 'csv']).default('json'),
+});
+
+const deleteAccount = z
+  .object({
+    // Step-up authentication: destructive, irreversible-ish, and the classic
+    // target of session-riding. Requiring the current password means a stolen
+    // session alone cannot destroy an account.
+    password: z.string().min(1, 'Password is required').max(config.password.maxLength),
+    confirmation: z.literal('DELETE', {
+      errorMap: () => ({ message: 'Type DELETE to confirm' }),
+    }),
+  })
+  .strict();
+
+const assertNoForbiddenFields = (payload) => {
+  for (const key of FORBIDDEN_USER_FIELDS) {
+    if (key in payload) {
+      throw new Error(`Unexpected field: ${key}`);
+    }
+  }
+};
+
+module.exports = {
+  FORBIDDEN_USER_FIELDS,
+  assertNoForbiddenFields,
+  register,
+  login,
+  changePassword,
+  updateProfile,
+  updateLimit,
+  createItem,
+  createFood,
+  idParam,
+  sessionUuidParam,
+  auditQuery,
+  exportQuery,
+  deleteAccount,
+  pagination,
+  // Exported for unit tests.
+  _primitives: { username, email, password, itemName, calories, uuid },
+};

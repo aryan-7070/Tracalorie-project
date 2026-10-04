@@ -62,9 +62,6 @@ cd Tracalorie-project
 ```bash
 # Create the database
 createdb tracalorie
-
-# Run the schema
-psql -d tracalorie -f server/sql/init.sql
 ```
 
 ### 3. Setup Backend
@@ -77,6 +74,9 @@ cp .env.example .env
 
 # Install dependencies
 npm install
+
+# Apply the database schema (runs server/sql/init.sql; safe to re-run)
+npm run setup
 
 # Start the server (development)
 npm run dev
@@ -121,8 +121,9 @@ PGPASSWORD=your-password
 ### Server
 
 ```bash
-npm run dev      # Start with nodemon (development)
-npm start        # Start production server
+npm run setup     # Apply the database schema (idempotent)
+npm run dev       # Start with nodemon (development)
+npm start         # Start production server
 ```
 
 ### Client
@@ -153,14 +154,31 @@ npm run preview  # Preview production build
 - `GET /api/user/limit` - Get calorie limit (requires auth)
 - `PATCH /api/user/limit` - Update calorie limit (requires auth)
 
+### Foods (Saved Library)
+
+- `GET /api/foods` - List saved foods (requires auth)
+- `POST /api/foods` - Save a food `{ type, name, calories }` (upsert, requires auth)
+- `DELETE /api/foods/:id` - Remove a food (requires auth)
+
+> Items added via `POST /api/items` are auto-saved to the food library.
+
+### Stats (Week Dashboard)
+
+- `GET /api/stats` - 7-day chart data, weekly totals, streaks, and badges (requires auth)
+
 ## Features
 
 - ✅ User registration and login with JWT authentication
 - ✅ Add/delete calorie entries
 - ✅ Track daily calorie intake
 - ✅ Set personalized calorie limits
-- ✅ Responsive UI with Bootstrap
+- ✅ Food library with quick-add suggestions (auto-built from your entries)
+- ✅ My Foods panel with one-click re-add of saved meals and workouts
+- ✅ Week dashboard with per-day chart, streak tracking, and achievement badges
 - ✅ Secure password hashing with bcrypt
+- ✅ Parameterized SQL queries (SQL-injection safe)
+- ✅ One-command DB setup (`npm run setup`)
+- ✅ Responsive UI with Bootstrap
 
 ## Development
 

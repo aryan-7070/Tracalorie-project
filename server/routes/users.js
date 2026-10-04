@@ -1,54 +1,52 @@
-const express = require('express');
-const auth = require('../middleware/auth');
-const pool = require('../db');
+'use strict';
 
-async function getClient(res) {
-  try {
-    return await pool.connect();
-  } catch (err) {
-    res.status(500).json({ message: 'Database connection error' });
-    return null;
-  }
-}
+/** User settings. Retained for the documented `/api/user/limit` contract. */
+
+const express = require('express');
+const { query } = require('../db');
+const { requireAuth, asyncHandler } = require('../middleware/auth');
+const { validate } = require('../middleware/validate');
+const { writeLimiter } = require('../middleware/rateLimit');
+const schemas = require('../schemas');
+const audit = require('../lib/audit');
+const { auditBase } = require('./auth');
 
 const router = express.Router();
 
-router.use(auth);
+router.use(requireAuth);
 
-router.get('/limit', async (req, res) => {
-  const client = await getClient(res);
-  if (!client) return;
+router.get(
+  '/limit',
+  asyncHandler(async (req, res) => {
+    const { rows } = await query('SELECT calorie_limit FROM users WHERE id = $1', [req.user.id]);
+    return res.json({ calorieLimit: rows[0]?.calorie_limit ?? 2000 });
+  })
+);
 
-  try {
-    const result = await client.query('SELECT calorie_limit FROM users WHERE id = $1', [req.user.id]);
-    const calorieLimit = result.rows[0]?.calorie_limit ?? 2000;
-    return res.json({ calorieLimit });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ message: 'Server error' });
-  } finally {
-    client.release();
-  }
-});
+router.patch(
+  '/limit',
+  writeLimiter,
+  validate({ body: schemas.updateLimit }),
+  asyncHandler(async (req, res) => {
+    const { rowCount } = await query('UPDATE users SET calorie_limit = $1 WHERE id = $2', [
+      req.body.calorieLimit,
+      req.user.id,
+    ]);
 
-router.patch('/limit', async (req, res) => {
-  const { calorieLimit } = req.body;
-  if (typeof calorieLimit !== 'number') {
-    return res.status(400).json({ message: 'calorieLimit must be a number' });
-  }
+    if (rowCount === 0) {
+      return res.status(404).json({ error: { code: 'user_not_found', message: 'User not found' } });
+    }
 
-  const client = await getClient(res);
-  if (!client) return;
+    await audit.record({
+      action: audit.EVENTS.PROFILE_UPDATED,
+      actorId: req.user.id,
+      sessionId: req.session?.uuid,
+      ...auditBase(req),
+      details: { fields: ['calorieLimit'] },
+    });
 
-  try {
-    await client.query('UPDATE users SET calorie_limit = $1 WHERE id = $2', [calorieLimit, req.user.id]);
-    return res.sendStatus(204);
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ message: 'Server error' });
-  } finally {
-    client.release();
-  }
-});
+    return res.status(204).end();
+  })
+);
 
 module.exports = router;
