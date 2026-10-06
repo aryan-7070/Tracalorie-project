@@ -48,7 +48,7 @@ function issueCsrfCookie(req, res, next) {
       ...{
         httpOnly: false, // deliberately readable: the client must echo it
         secure: config.cookies.secure,
-        sameSite: config.cookies.samesite,
+        sameSite: config.cookies.sameSite,
         path: '/',
       },
       ...(config.cookies.domain ? { domain: config.cookies.domain } : {}),

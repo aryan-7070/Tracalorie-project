@@ -43,7 +43,7 @@ function cookieOptions({ maxAge, path = '/' } = {}) {
   return {
     httpOnly: true,
     secure: config.cookies.secure,
-    sameSite: config.cookies.samesite,
+    sameSite: config.cookies.sameSite,
     path,
     ...(config.cookies.domain ? { domain: config.cookies.domain } : {}),
     ...(maxAge ? { maxAge } : {}),

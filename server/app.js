@@ -15,11 +15,14 @@
  *   6. rate limits          — before any handler allocates resources
  *   7. CSRF cookie          — every response carries a token
  *   8. routes
- *   9. 404 then error handler — terminal, so nothing escapes
+ *   9. static client build  — after the API, so it can never shadow a route
+ *  10. 404 then error handler — terminal, so nothing escapes
  */
 
 const express = require('express');
 const cookieParser = require('cookie-parser');
+const fs = require('fs');
+const path = require('path');
 
 const config = require('./config/env');
 const { securityHeaders, conditionalHsts } = require('./middleware/securityHeaders');
@@ -101,6 +104,49 @@ function createApp() {
   app.use('/api/foods', require('./routes/foods'));
   app.use('/api/user', require('./routes/users'));
   app.use('/api/stats', require('./routes/stats'));
+
+  // --- Static client build, when one is present ---------------------------
+  // Serving the built SPA from this process keeps the browser on a single
+  // origin, which is what allows the session cookies to stay SameSite=strict
+  // and keep their __Host- prefix. Mounted after the API routes so an unknown
+  // /api path still gets a JSON 404 rather than the app shell.
+  //
+  // Guarded on existence so a checkout with no client build still boots as a
+  // pure API (that is how the dev workflow runs the client through Vite).
+  const clientDist = path.join(__dirname, '..', 'client', 'dist');
+
+  if (fs.existsSync(clientDist)) {
+    // Vite fingerprints everything under /assets, so those are immutable for a
+    // year. index.html is not fingerprinted, so caching it would pin browsers
+    // to a manifest pointing at bundles a deploy has already deleted.
+    app.use(
+      express.static(clientDist, {
+        index: false,
+        maxAge: '1y',
+        immutable: true,
+        setHeaders(res, filePath) {
+          if (path.basename(filePath) === 'index.html') {
+            res.setHeader('Cache-Control', 'no-cache');
+          }
+        },
+      })
+    );
+
+    // SPA fallback: the router owns its own paths, so a deep link such as
+    // /security has no file on disk and must resolve to the app shell. /api is
+    // excluded so that the 404 handler below keeps returning JSON.
+    app.use((req, res, next) => {
+      if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+      if (req.path === '/api' || req.path.startsWith('/api/')) return next();
+      // Set here rather than via express.static's setHeaders: that hook never
+      // sees this response, and sendFile() would otherwise fall back to its own
+      // weak `max-age=0` instead of an explicit no-cache for the shell.
+      res.setHeader('Cache-Control', 'no-cache');
+      res.sendFile(path.join(clientDist, 'index.html'), (err) => {
+        if (err) next(err);
+      });
+    });
+  }
 
   // --- Terminal handlers --------------------------------------------------
   app.use(notFoundHandler);
