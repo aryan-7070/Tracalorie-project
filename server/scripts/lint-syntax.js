@@ -40,6 +40,10 @@ const ALLOW = {
   'scripts/load-check.js': ['console', 'secret'],
   // Test-environment fixtures only; never reachable in production.
   'config/env.js': ['secret'],
+  // Integration fixtures. The passwords here are inputs the suite submits to
+  // prove validation and rejection behave — they are not credentials for
+  // anything, and NODE_ENV=test supplies throwaway signing secrets.
+  'test/api.test.js': ['secret'],
 };
 
 const SAFE_SQL_ANNOTATION = /lint:sql-safe\b/;

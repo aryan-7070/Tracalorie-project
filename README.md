@@ -11,10 +11,12 @@ A full-stack web application for tracking daily calorie intake with user authent
 - React Bootstrap
 
 **Backend:**
-- Node.js + Express
+- Node.js (20+) + Express 5
 - PostgreSQL
-- JWT Authentication
+- Cookie-based sessions (HttpOnly, `SameSite=Strict`, `__Host-` prefix) over JWT access tokens
 - Bcrypt for password hashing
+- Zod request validation, helmet security headers, explicit CORS allowlist
+- Hash-chained security audit log with envelope-encrypted PII
 
 ## Project Structure
 
@@ -31,11 +33,18 @@ Tracalorie-project/
 │   ├── package.json
 │   └── vite.config.js
 ├── server/                # Express backend
-│   ├── middleware/        # Auth middleware
+│   ├── config/           # Validated env config (single source of truth)
+│   ├── lib/              # crypto, sessions, passwords, audit, findings
+│   ├── middleware/       # auth, csrf, cors, rate limit, security headers
 │   ├── routes/           # API routes
-│   ├── sql/              # Database schema
+│   ├── schemas/          # Zod schemas for every input
+│   ├── sql/              # Checksummed migrations (001_core.sql)
+│   ├── test/             # Integration suite (npm test)
+│   ├── scripts/          # lint, load-check, secrets generator
+│   ├── app.js            # createApp() factory
 │   ├── db.js             # Database connection
 │   ├── index.js          # Server entry point
+│   ├── migrate.js        # Migration runner
 │   ├── package.json
 │   ├── .env.example
 │   └── README.md
@@ -44,7 +53,7 @@ Tracalorie-project/
 
 ## Prerequisites
 
-- Node.js (v14 or higher)
+- Node.js (v20 or higher — see `engines` in `server/package.json`)
 - npm or yarn
 - PostgreSQL (v12 or higher)
 
@@ -72,10 +81,14 @@ cd server
 # Copy environment file and update with your values
 cp .env.example .env
 
+# Generate JWT_SECRET, PII_ENCRYPTION_KEY and BLIND_INDEX_KEY.
+# The server refuses to boot without all three.
+npm run secrets:generate
+
 # Install dependencies
 npm install
 
-# Apply the database schema (runs server/sql/init.sql; safe to re-run)
+# Apply the database schema (runs server/sql/001_core.sql; safe to re-run)
 npm run setup
 
 # Start the server (development)
@@ -102,17 +115,42 @@ The client will run on `http://localhost:3000`
 
 ### Server (.env)
 
+The server validates configuration at boot and exits if anything required is
+missing or unsafe — there are no silent defaults for secrets.
+
+**Required (the server refuses to start without these):**
+
 ```
+NODE_ENV=development
 PORT=5000
-JWT_SECRET=your-secret-key-here
+
+# Generate with: npm run secrets:generate  (all three must be 32+ characters)
+JWT_SECRET=
+PII_ENCRYPTION_KEY=
+BLIND_INDEX_KEY=
 
 # PostgreSQL Connection
 PGHOST=localhost
 PGPORT=5432
 PGDATABASE=tracalorie
 PGUSER=postgres
-PGPASSWORD=your-password
+PGPASSWORD=
+
+CORS_ORIGINS=http://localhost:3000
 ```
+
+**Required only when `NODE_ENV=production`** (invariants are enforced):
+
+```
+PGSSLMODE=require        # TLS to Postgres is mandatory in production
+PGPASSWORD=              # must be set
+COOKIE_SECURE=true       # defaults to true in production
+CORS_ORIGINS=https://your-app.example.com   # must be a real allowlist, "*" is refused
+```
+
+**Optional** — sensible defaults exist for everything else: rate limits, lockout
+thresholds, token TTLs, `BCRYPT_ROUNDS`, `TRUST_PROXY`, cookie prefix and
+`GCS_EXPORT_*`. See `server/.env.example` for the full documented list.
 
 **Important:** Never commit `.env` file. Use `.env.example` as a template.
 
@@ -121,9 +159,14 @@ PGPASSWORD=your-password
 ### Server
 
 ```bash
-npm run setup     # Apply the database schema (idempotent)
-npm run dev       # Start with nodemon (development)
-npm start         # Start production server
+npm run setup         # Apply migrations (idempotent)
+npm run migrate       # Apply pending migrations
+npm run migrate:status # Show applied / pending / drifted
+npm run dev           # Start with nodemon (development)
+npm start             # Start production server
+npm test              # Integration suite (needs a migrated database)
+npm run lint          # Syntax + house-style checks
+npm run secrets:generate # Print a ready-to-paste secrets block
 ```
 
 ### Client
@@ -136,16 +179,34 @@ npm run preview  # Preview production build
 
 ## API Endpoints
 
+Authentication is **cookie-based**, not Bearer: the browser holds an
+`HttpOnly` access token and a `__Host-`-prefixed refresh token, both
+`SameSite=Strict`. Every mutating request must also echo the `csrf_token`
+cookie in an `X-CSRF-Token` header.
+
+### Health
+
+- `GET /api/health` - Liveness probe, never touches the database
+- `GET /api/health/ready` - Readiness probe, `503` if the database is down
+
 ### Authentication
 
 - `POST /api/auth/register` - Register new user
 - `POST /api/auth/login` - Login user
-- `GET /api/auth/me` - Get current user (requires auth)
+- `POST /api/auth/refresh` - Rotate the access token
+- `POST /api/auth/logout` - Revoke the current session
+- `POST /api/auth/logout-all` - Revoke every session
+- `POST /api/auth/change-password` - Change password (requires current password)
+- `PATCH /api/auth/profile` - Update display name, email, timezone or units
+- `GET /api/auth/csrf` - Issue the CSRF cookie
+- `GET /api/auth/session` - Current session metadata
+- `GET /api/auth/me` - Current user (requires auth)
 
 ### Items (Calorie Entries)
 
-- `GET /api/items` - Get all items (requires auth)
-- `POST /api/items` - Create new item (requires auth)
+- `GET /api/items` - Get all items, grouped into `meals` / `workouts` (requires auth)
+- `POST /api/items` - Create new item `{ type, name, calories, entryDate? }` (requires auth)
+- `PATCH /api/items/:id` - Update an entry (requires auth)
 - `DELETE /api/items/:id` - Delete specific item (requires auth)
 - `DELETE /api/items` - Clear all items (requires auth)
 
@@ -165,6 +226,20 @@ npm run preview  # Preview production build
 ### Stats (Week Dashboard)
 
 - `GET /api/stats` - 7-day chart data, weekly totals, streaks, and badges (requires auth)
+
+### Security
+
+- `GET /api/security/overview` - Account security posture (requires auth)
+- `GET /api/security/sessions` - Active sessions (requires auth)
+- `DELETE /api/security/sessions/:id` - Revoke a session (requires auth)
+- `GET /api/security/audit` - Hash-chained audit log (requires auth)
+- `GET /api/security/audit/verify` - Verify the audit chain (requires auth)
+- `GET /api/security/findings` - Security findings (requires auth)
+- `POST /api/security/findings/:id/resolve` - Resolve a finding (requires auth)
+- `GET /api/security/export` - Export your data (requires auth)
+- `POST /api/security/export/archive` - Archive an export (requires auth)
+- `DELETE /api/security/account` - Delete account (requires password + `DELETE`)
+- `GET /api/security/profile` - Profile fields (requires auth)
 
 ## Features
 
@@ -202,31 +277,74 @@ Then open `http://localhost:3000` in your browser.
 
 ## Deployment
 
-### Frontend Deployment (Vercel, Netlify, etc.)
+The server serves the built client from `client/dist` when that directory
+exists, so the UI and API run on **one origin**. That matters: the session
+cookies are `SameSite=Strict` with a `__Host-` prefix, and browsers never send
+them across sites. A static host for the client plus a separate API host breaks
+login unless you also switch to `COOKIE_SAMESITE=none` and give the client an
+explicit API base URL — neither of which the client currently uses.
 
-1. Build the client:
-   ```bash
-   cd client
-   npm run build
-   ```
+So deploy this as **one service**, not two.
 
-2. Deploy the `dist/` folder to your hosting service
+### Render, Railway, Fly.io or any Node host
 
-3. Configure environment variables for API endpoint
+```
+Build command:  npm i --prefix server && npm i --prefix client && npm run build --prefix client
+Start command:  npm run migrate --prefix server && npm start --prefix server
+```
 
-### Backend Deployment (Heroku, Railway, etc.)
+`npm run build --prefix client` is what produces `client/dist`; without it the
+server starts as an API only and every page request 404s.
 
-1. Set environment variables on your hosting platform
-2. Ensure PostgreSQL database is accessible
-3. Deploy the `server/` folder
+Environment variables: see above. `NODE_ENV=production` turns on the strict
+invariants, so `PGSSLMODE`, `PGPASSWORD`, `COOKIE_SECURE` and a real
+`CORS_ORIGINS` must all be set before the process will boot.
+
+### Database
+
+Any managed PostgreSQL. Neon and Supabase both have free tiers that work.
+Point `PGHOST` / `PGDATABASE` / `PGUSER` / `PGPASSWORD` at it and run
+`npm run migrate --prefix server` once (the start command above already does).
+
+Migrations are checksummed and refuse to run if an already-applied file has
+changed — add a new `server/sql/NNN_*.sql` instead of editing an old one.
+
+### What does *not* work
+
+- **Netlify / Vercel for the whole app.** They have no PostgreSQL, and
+  serverless functions cannot hold your `pg` pool across invocations, run the
+  boot-time healthcheck, or keep the 15-minute session-purge interval alive.
+- **Hosting `client/` on Netlify and `server/` elsewhere without changes.** The
+  client only calls relative `/api/...` paths and has no `VITE_API_URL`
+  support, so those requests hit the static host and 404.
 
 ## Security Notes
 
-- Never commit `.env` files
-- Always use strong JWT secrets in production
-- Use HTTPS in production
-- Implement rate limiting for API endpoints
-- Validate all user inputs on both client and server
+Already implemented — see `server/README.md` for the full model:
+
+- Never commit `.env` files; secrets are validated at boot and the process
+  exits rather than starting with a weak or missing value
+- Rate limiting on global, auth, write and heavy routes
+- Account lockout with progressive delay after repeated failed logins
+- `HttpOnly` + `SameSite=Strict` + `__Host-` cookies; refresh tokens rotate
+  and revoke the token they replace
+- Zod validation on every input; unknown body fields are rejected, not stripped
+- Parameterised SQL throughout, and a lint rule that fails on interpolated SQL
+- Content-Security-Policy set to `default-src 'none'` with only same-origin
+  sources — which is why no third-party CDN or webfont is loaded
+
+## Testing
+
+```bash
+cd server
+npm test
+```
+
+The suite mounts the real app in-process via supertest and exercises
+registration, login, session refresh, item CRUD, CSRF enforcement and audit
+chain verification. It needs a reachable, migrated database but no `.env`
+(`NODE_ENV=test` supplies throwaway secrets). Point `PG*` at a scratch
+database — the tests create rows.
 
 ## License
 
