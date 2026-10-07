@@ -89,7 +89,12 @@ const isoDate = z
 const uuid = z.string().uuid('Must be a valid identifier');
 
 /** Positive integer id from a path segment. */
-const idParam = z.coerce.number().int().positive().max(2_147_483_647);
+// Wrapped in an object: validate() parses `req.params` as a whole, which is
+// `{ id: '3' }`. A bare primitive here would make z.coerce call
+// `Number({ id: '3' })` and throw, so every route using
+// `validate({ params: idParam })` would 500. See sessionUuidParam for the
+// same shape.
+const idParam = z.object({ id: z.coerce.number().int().positive().max(2_147_483_647) });
 
 const pagination = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(50),

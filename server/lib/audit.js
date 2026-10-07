@@ -111,7 +111,14 @@ function canonicalEntry(entry) {
     prev_hash: entry.prevHash,
     actor_id: entry.actorId ?? null,
     action: entry.action,
-    outcome: entry.outcome,
+    // Default here rather than leaving it unset: toParams() always binds this
+    // position, so an undefined outcome reached Postgres as an explicit NULL
+    // and tripped the column's NOT NULL. An explicit NULL also bypasses the
+    // column DEFAULT, which is why every success-path audit write was silently
+    // dropped while the 7 callers that pass `outcome: 'failure'` succeeded.
+    // verifyChain is unaffected: rows it re-reads are NOT NULL by constraint,
+    // so their value never falls through to this default.
+    outcome: entry.outcome ?? 'success',
     ip_address: entry.ip ?? null,
     user_agent: entry.userAgent ? String(entry.userAgent).slice(0, 512) : null,
     request_id: entry.requestId ?? null,
