@@ -77,7 +77,10 @@ router.get(
         `SELECT entry_date::text AS day,
                 SUM(CASE WHEN type = 'meal' THEN calories ELSE 0 END)::int AS consumed,
                 SUM(CASE WHEN type = 'workout' THEN calories ELSE 0 END)::int AS burned,
-                COUNT(*)::int AS item_count
+                COUNT(*)::int AS item_count,
+                COALESCE(SUM(CASE WHEN type = 'meal' THEN protein_g ELSE 0 END), 0)::real AS protein_g,
+                COALESCE(SUM(CASE WHEN type = 'meal' THEN carbs_g ELSE 0 END), 0)::real AS carbs_g,
+                COALESCE(SUM(CASE WHEN type = 'meal' THEN fat_g ELSE 0 END), 0)::real AS fat_g
          FROM items
          WHERE user_id = $1
            AND entry_date >= (now() AT TIME ZONE 'UTC')::date - $2::int

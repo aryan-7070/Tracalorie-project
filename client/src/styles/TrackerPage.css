@@ -738,3 +738,46 @@
 }
 
 .tr-suggest-cal { font-size: .74rem; color: #6b7280; flex-shrink: 0; }
+
+/* -- Day navigator -- */
+.tr-daynav {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 22px;
+}
+
+.tr-daynav-center {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.tr-daynav-input {
+  flex: none;
+  padding: 8px 12px;
+  color-scheme: dark;
+  width: 165px;
+}
+
+.tr-daynav-label {
+  font-size: .95rem;
+  font-weight: 500;
+  color: #9ca3af;
+}
+
+.tr-daynav-today { margin-left: 4px; }
+
+.tr-btn-ghost:disabled {
+  opacity: .35;
+  cursor: not-allowed;
+}
+
+/* -- Inline entry editing -- */
+.tr-item-editing { background: rgba(255,255,255,.04); }
+
+.tr-edit-name { min-width: 0; }
+
+.tr-edit-cal { width: 90px; flex: none; }
+
+.tr-btn-mini { padding: 5px 10px; font-size: .75rem; border-radius: 7px; }

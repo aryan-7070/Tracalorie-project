@@ -104,6 +104,7 @@ function createApp() {
   app.use('/api/foods', require('./routes/foods'));
   app.use('/api/user', require('./routes/users'));
   app.use('/api/stats', require('./routes/stats'));
+  app.use('/api/recipes', require('./routes/recipes'));
 
   // --- Static client build, when one is present ---------------------------
   // Serving the built SPA from this process keeps the browser on a single

@@ -46,19 +46,37 @@ function resolveEntryDate(raw) {
   return raw;
 }
 
-// GET /api/items
+// GET /api/items?date=YYYY-MM-DD
+//
+// With `date`, returns exactly that calendar day's entries — the day's view is
+// index-driven (idx_items_user_date) and unbounded only by the day itself.
+// Without `date`, returns the most recent entries, capped at 500, for callers
+// that want a rolling feed rather than a day page.
 router.get(
   '/',
   heavyLimiter,
+  validate({ query: schemas.itemListQuery }),
   asyncHandler(async (req, res) => {
-    const { rows } = await query(
-      `SELECT id, type, name, calories, entry_date, created_at
-       FROM items
-       WHERE user_id = $1
-       ORDER BY created_at DESC
-       LIMIT 500`,
-      [req.user.id]
-    );
+    const date = req.validatedQuery?.date;
+
+    const { rows } = date
+      ? await query(
+          `SELECT id, type, name, calories, protein_g, carbs_g, fat_g,
+                  entry_date::text AS entry_date, created_at
+           FROM items
+           WHERE user_id = $1 AND entry_date = $2::date
+           ORDER BY created_at DESC`,
+          [req.user.id, date]
+        )
+      : await query(
+          `SELECT id, type, name, calories, protein_g, carbs_g, fat_g,
+                  entry_date::text AS entry_date, created_at
+           FROM items
+           WHERE user_id = $1
+           ORDER BY created_at DESC
+           LIMIT 500`,
+          [req.user.id]
+        );
 
     const userResult = await query('SELECT calorie_limit FROM users WHERE id = $1', [req.user.id]);
     const calorieLimit = userResult.rows[0]?.calorie_limit ?? 2000;
@@ -77,28 +95,33 @@ router.post(
   writeLimiter,
   validate({ body: schemas.createItem }),
   asyncHandler(async (req, res) => {
-    const { type, name, calories, entryDate } = req.body;
+    const { type, name, calories, protein, carbs, fat, entryDate } = req.body;
     const date = resolveEntryDate(entryDate);
 
     // One transaction: an entry and its library upsert must both land or
     // neither, otherwise the food library drifts out of sync with the log.
     const created = await transaction(async (client) => {
       const { rows } = await client.query(
-        `INSERT INTO items (user_id, type, name, calories, entry_date)
-         VALUES ($1, $2, $3, $4, COALESCE($5::date, (now() AT TIME ZONE 'UTC')::date))
-         RETURNING id, type, name, calories, entry_date, created_at`,
-        [req.user.id, type, name, calories, date]
+        `INSERT INTO items (user_id, type, name, calories, protein_g, carbs_g, fat_g, entry_date)
+         VALUES ($1, $2, $3, $4, $5, $6, $7,
+                 COALESCE($8::date, (now() AT TIME ZONE 'UTC')::date))
+         RETURNING id, type, name, calories, protein_g, carbs_g, fat_g,
+                   entry_date::text AS entry_date, created_at`,
+        [req.user.id, type, name, calories, protein ?? null, carbs ?? null, fat ?? null, date]
       );
 
       await client.query(
-        `INSERT INTO foods (user_id, type, name, calories)
-         VALUES ($1, $2, $3, $4)
+        `INSERT INTO foods (user_id, type, name, calories, protein_g, carbs_g, fat_g)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (user_id, type, name)
          DO UPDATE SET
            calories = EXCLUDED.calories,
+           protein_g = EXCLUDED.protein_g,
+           carbs_g = EXCLUDED.carbs_g,
+           fat_g = EXCLUDED.fat_g,
            times_used = foods.times_used + 1,
            last_used = now()`,
-        [req.user.id, type, name, calories]
+        [req.user.id, type, name, calories, protein ?? null, carbs ?? null, fat ?? null]
       );
 
       return rows[0];
@@ -123,7 +146,15 @@ router.patch(
     //
     // Column names come from this literal map, never from the request, so the
     // identifier list cannot be influenced by a client.
-    const allowed = { type: 'type', name: 'name', calories: 'calories', entryDate: 'entry_date' };
+    const allowed = {
+      type: 'type',
+      name: 'name',
+      calories: 'calories',
+      entryDate: 'entry_date',
+      protein: 'protein_g',
+      carbs: 'carbs_g',
+      fat: 'fat_g',
+    };
     const sets = [];
     const values = [req.params.id];
 
@@ -144,7 +175,8 @@ router.patch(
     const { rows } = await query(
       // lint:sql-safe `sets` is assembled above from a literal column allowlist.
       `UPDATE items SET ${sets.join(', ')} WHERE id = $1 AND user_id = $${values.length}
-       RETURNING id, type, name, calories, entry_date, created_at`,
+       RETURNING id, type, name, calories, protein_g, carbs_g, fat_g,
+                 entry_date::text AS entry_date, created_at`,
       values
     );
 
@@ -169,12 +201,25 @@ router.delete(
   })
 );
 
-// DELETE /api/items
+// DELETE /api/items?date=YYYY-MM-DD
+//
+// With `date`, clears just that calendar day (the day-view's "clear day").
+// Without it, wipes the whole log — the destructive reset, still confirmed
+// client-side before it is sent.
 router.delete(
   '/',
   writeLimiter,
+  validate({ query: schemas.itemListQuery }),
   asyncHandler(async (req, res) => {
-    const { rowCount } = await query('DELETE FROM items WHERE user_id = $1', [req.user.id]);
+    const date = req.validatedQuery?.date;
+
+    const { rowCount } = date
+      ? await query('DELETE FROM items WHERE user_id = $1 AND entry_date = $2::date', [
+          req.user.id,
+          date,
+        ])
+      : await query('DELETE FROM items WHERE user_id = $1', [req.user.id]);
+
     return res.json({ deleted: rowCount });
   })
 );

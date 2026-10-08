@@ -86,6 +86,22 @@ const isoDate = z
   .regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be in YYYY-MM-DD format')
   .refine((v) => !Number.isNaN(Date.parse(`${v}T00:00:00Z`)), 'Enter a valid date');
 
+// Macronutrients in grams. One decimal place max (matches NUMERIC(6,1)
+// columns); a client cannot smuggle extra precision that would silently
+// round on write and drift the displayed totals.
+const macro = z
+  .number()
+  .min(0, 'Grams cannot be negative')
+  .max(10000, 'Grams must be at most 10000')
+  .refine((v) => Math.abs(v * 10 - Math.round(v * 10)) < 1e-9, 'Grams must have at most one decimal');
+
+/** Shared optional macro fields for item/food/ingredient bodies. */
+const macroFields = {
+  protein: macro.optional(),
+  carbs: macro.optional(),
+  fat: macro.optional(),
+};
+
 const uuid = z.string().uuid('Must be a valid identifier');
 
 /** Positive integer id from a path segment. */
@@ -135,6 +151,12 @@ const updateProfile = z
       .regex(/^[A-Za-z]+(?:\/[A-Za-z0-9_+\-]+)+$/, 'Enter a valid IANA timezone, e.g. Asia/Kolkata')
       .optional(),
     units: z.enum(['metric', 'imperial']).optional(),
+    // Body weight in kg (whole or one decimal). Feeds the MET formula: the
+    // server combines it with an exercise's MET value and the logged duration
+    // to derive calories, so a client cannot dictate the number.
+    bodyWeightKg: z.number().min(20, 'Body weight must be at least 20 kg').max(300, 'Body weight must be at most 300 kg').optional(),
+    // Daily protein goal in grams for the macros progress bars.
+    proteinTargetG: z.number().int().min(0, 'Protein target must be at least 0').max(2000, 'Protein target must be at most 2000 g').optional(),
   })
   .strict()
   .refine((v) => Object.keys(v).length > 0, 'Provide at least one field to update');
@@ -157,6 +179,7 @@ const createItem = z
     // Optional: lets a client backdate an entry using its own timezone rather
     // than the server's. Server timezone would misattribute late-evening logs.
     entryDate: isoDate.optional(),
+    ...macroFields,
   })
   .strict();
 
@@ -165,6 +188,80 @@ const createFood = z
     type: entryType,
     name: itemName,
     calories,
+    ...macroFields,
+  })
+  .strict();
+
+// GET /api/items: optional single-day filter. Without it the route returns the
+// most recent entries (capped), with it the exact calendar day requested.
+const itemListQuery = z.object({
+  date: isoDate.optional(),
+});
+
+// -----------------------------------------------------------------------------
+// Recipes
+// -----------------------------------------------------------------------------
+// Servings: NUMERIC(4,2) BETWEEN 0.1 AND 200 in the schema, so the same range
+// is enforced here to fail fast with a field-level message.
+const servings = z
+  .number()
+  .min(0.1, 'Servings must be at least 0.1')
+  .max(200, 'Servings must be at most 200')
+  .refine((v) => Math.abs(v * 100 - Math.round(v * 100)) < 1e-9, 'Servings must have at most two decimals');
+
+// Ingredient amount: matches recipe_ingredients.amount NUMERIC(6,2).
+const ingredientAmount = z
+  .number()
+  .min(0, 'Amount cannot be negative')
+  .max(10000, 'Amount must be at most 10000')
+  .refine((v) => Math.abs(v * 100 - Math.round(v * 100)) < 1e-9, 'Amount must have at most two decimals');
+
+const createRecipeIngredient = z
+  .object({
+    name: z
+      .string()
+      .trim()
+      .min(1, 'Ingredient name is required')
+      .max(120, 'Ingredient name must be at most 120 characters'),
+    amount: ingredientAmount.optional(),
+    calories,
+    ...macroFields,
+  })
+  .strict();
+
+// Recipe names are stored in a CHECK (char_length BETWEEN 1 AND 120) column,
+// tighter than generic itemName's 200, so validate the real bound here.
+const recipeName = itemName.refine((v) => v.length <= 120, 'Recipe name must be at most 120 characters');
+
+const createRecipe = z
+  .object({
+    name: recipeName,
+    description: z.string().trim().max(400).optional(),
+    servings: servings.optional(),
+    // Ingredients are optional on create (an empty recipe can be filled in
+    // later), but a non-empty array must be well formed.
+    ingredients: z.array(createRecipeIngredient).min(1, 'Add at least one ingredient').max(200).optional(),
+  })
+  .strict();
+
+const updateRecipe = createRecipe.partial().strict();
+
+// GET /api/foods/lookup?q= — external food search term. Min length keeps
+// broad queries (single character) from hammering the upstream API.
+const foodLookupQuery = z.object({
+  q: z
+    .string()
+    .trim()
+    .min(2, 'Search term must be at least 2 characters')
+    .max(100, 'Search term must be at most 100 characters'),
+});
+
+const logRecipe = z
+  .object({
+    // Servings to log (may differ from the recipe's own serving count, e.g.
+    // half a portion). Server scales cached totals by servingsLogged/servings.
+    servings: z.number().min(0.25, 'Servings must be at least 0.25').max(200, 'Servings must be at most 200'),
+    entryDate: isoDate.optional(),
   })
   .strict();
 
@@ -208,6 +305,12 @@ module.exports = {
   updateLimit,
   createItem,
   createFood,
+  itemListQuery,
+  foodLookupQuery,
+  createRecipe,
+  updateRecipe,
+  logRecipe,
+  createRecipeIngredient,
   idParam,
   sessionUuidParam,
   auditQuery,

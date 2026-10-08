@@ -50,13 +50,16 @@ function presentUser(row) {
     calorieLimit: row.calorie_limit,
     units: row.units,
     timezone: row.timezone,
+    bodyWeightKg: row.body_weight_kg,
+    proteinTargetG: row.protein_target_g,
     lastLoginAt: row.last_login_at,
     createdAt: row.created_at,
   };
 }
 
 const USER_COLUMNS = `id, username, email_enc, display_name_enc, calorie_limit,
-                      units, timezone, last_login_at, created_at`;
+                      units, timezone, body_weight_kg, protein_target_g,
+                      last_login_at, created_at`;
 
 /** Set the full cookie pair for a new session. */
 function establishSession(res, { accessToken, refreshToken }) {
@@ -630,7 +633,7 @@ router.patch(
   writeLimiter,
   validate({ body: schemas.updateProfile }),
   asyncHandler(async (req, res) => {
-    const { displayName, email, timezone, units } = req.body;
+    const { displayName, email, timezone, units, bodyWeightKg, proteinTargetG } = req.body;
     const userId = req.user.id;
     const changed = [];
 
@@ -659,6 +662,14 @@ router.patch(
 
     if (timezone !== undefined) push('timezone', timezone);
     if (units !== undefined) push('units', units);
+    if (bodyWeightKg !== undefined) {
+      push('body_weight_kg', bodyWeightKg);
+      changed.push('bodyWeightKg');
+    }
+    if (proteinTargetG !== undefined) {
+      push('protein_target_g', proteinTargetG);
+      changed.push('proteinTargetG');
+    }
 
     // `sets` is built by `push()` above from literal column fragments; only the
     // values are request-derived, and those travel as bound parameters.

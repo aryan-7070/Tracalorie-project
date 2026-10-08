@@ -1,13 +1,21 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { request } from '../services/api';
+import { toYYYYMMDD } from './tracker/helpers';
+import DayNav from './tracker/DayNav';
+import HeroStats from './tracker/HeroStats';
+import ItemForm from './tracker/ItemForm';
+import EntryList from './tracker/EntryList';
+import FoodLibrary from './tracker/FoodLibrary';
+import WeekPanel from './tracker/WeekPanel';
 import '../styles/TrackerPage.css';
 
-const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
-
-const toYYYYMMDD = (d) =>
-  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-
+/**
+ * Tracker shell: owns all server state and the selected day, and composes the
+ * presentational panels. Every entry is loaded for `selectedDate` via
+ * `GET /api/items?date=`, so totals, lists and forms all speak about one day.
+ */
 export default function TrackerPage({ user, onLogout, onShowSecurity, showSecurity }) {
+  const [selectedDate, setSelectedDate] = useState(() => toYYYYMMDD(new Date()));
   const [meals, setMeals] = useState([]);
   const [workouts, setWorkouts] = useState([]);
   const [foods, setFoods] = useState([]);
@@ -17,8 +25,6 @@ export default function TrackerPage({ user, onLogout, onShowSecurity, showSecuri
   const [limitInput, setLimitInput] = useState(2000);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [mealFilter, setMealFilter] = useState('');
-  const [workoutFilter, setWorkoutFilter] = useState('');
 
   useEffect(() => { setLimitInput(limit); }, [limit]);
 
@@ -36,53 +42,70 @@ export default function TrackerPage({ user, onLogout, onShowSecurity, showSecuri
       .catch(syncError);
   };
 
-  useEffect(() => {
+  // Load one day's entries. Kept as a callback so the date effect below only
+  // re-runs when the day actually changes.
+  const loadDay = useCallback((date) => {
     setLoading(true);
     setError(null);
-    Promise.all([
-      request('/api/items'),
-      request('/api/foods'),
-      request('/api/stats'),
-    ])
-      .then(([items, foodsData, statsData]) => {
+    return request(`/api/items?date=${date}`)
+      .then((items) => {
         setMeals(items.meals || []);
         setWorkouts(items.workouts || []);
         setLimit(items.calorieLimit || 2000);
-        setFoods(foodsData || []);
-        setStats(statsData || null);
       })
       .catch((err) => setError(err?.message || 'Unable to load data'))
       .finally(() => setLoading(false));
   }, []);
 
+  useEffect(() => {
+    loadDay(selectedDate);
+  }, [selectedDate, loadDay]);
+
+  // One-time bootstrap: foods library + week stats; the day itself is loaded
+  // by the effect above, so it is not fetched twice here.
+  useEffect(() => {
+    Promise.all([request('/api/foods'), request('/api/stats')])
+      .then(([foodsData, statsData]) => {
+        setFoods(foodsData || []);
+        setStats(statsData || null);
+      })
+      .catch((err) => setError(err?.message || 'Unable to load data'));
+  }, []);
+
   const caloriesConsumed = useMemo(() => meals.reduce((t, m) => t + m.calories, 0), [meals]);
-  const caloriesBurned   = useMemo(() => workouts.reduce((t, w) => t + w.calories, 0), [workouts]);
-  const totalCalories    = useMemo(() => caloriesConsumed - caloriesBurned, [caloriesConsumed, caloriesBurned]);
-  const remaining        = useMemo(() => limit - totalCalories, [limit, totalCalories]);
-  const progressPercent  = useMemo(
-    () => limit <= 0 ? 0 : clamp((totalCalories / limit) * 100, 0, 100),
-    [limit, totalCalories]
-  );
+  const caloriesBurned = useMemo(() => workouts.reduce((t, w) => t + w.calories, 0), [workouts]);
 
   const addItem = async (type, name, calories) => {
     if (!name || !calories) return;
     try {
       const item = await request('/api/items', {
         method: 'POST',
-        body: { type, name, calories: Number(calories) },
+        body: { type, name, calories: Number(calories), entryDate: selectedDate },
       });
-      type === 'meal' ? setMeals(p => [item, ...p]) : setWorkouts(p => [item, ...p]);
+      type === 'meal' ? setMeals((p) => [item, ...p]) : setWorkouts((p) => [item, ...p]);
       refreshFoods();
       refreshStats();
     } catch (err) { syncError(err); }
+  };
+
+  const editItem = async (id, type, fields) => {
+    try {
+      const updated = await request(`/api/items/${id}`, { method: 'PATCH', body: fields });
+      const apply = (list) => list.map((i) => (i.id === id ? { ...i, ...updated } : i));
+      type === 'meal' ? setMeals(apply) : setWorkouts(apply);
+      return true;
+    } catch (err) {
+      syncError(err);
+      return false;
+    }
   };
 
   const deleteItem = async (id, type) => {
     try {
       await request(`/api/items/${id}`, { method: 'DELETE' });
       type === 'meal'
-        ? setMeals(p => p.filter(i => i.id !== id))
-        : setWorkouts(p => p.filter(i => i.id !== id));
+        ? setMeals((p) => p.filter((i) => i.id !== id))
+        : setWorkouts((p) => p.filter((i) => i.id !== id));
       refreshStats();
     } catch (err) { syncError(err); }
   };
@@ -90,14 +113,15 @@ export default function TrackerPage({ user, onLogout, onShowSecurity, showSecuri
   const deleteFood = async (id) => {
     try {
       await request(`/api/foods/${id}`, { method: 'DELETE' });
-      setFoods(p => p.filter(f => f.id !== id));
+      setFoods((p) => p.filter((f) => f.id !== id));
     } catch (err) { syncError(err); }
   };
 
-  const resetAll = async () => {
-    if (!window.confirm('Reset will delete all meals and workouts. Continue?')) return;
+  const clearDay = async () => {
+    const label = selectedDate === toYYYYMMDD(new Date()) ? 'today' : selectedDate;
+    if (!window.confirm(`Delete all entries for ${label}?`)) return;
     try {
-      await request('/api/items', { method: 'DELETE' });
+      await request(`/api/items?date=${selectedDate}`, { method: 'DELETE' });
       setMeals([]);
       setWorkouts([]);
       refreshStats();
@@ -115,13 +139,8 @@ export default function TrackerPage({ user, onLogout, onShowSecurity, showSecuri
     } catch (err) { syncError(err); }
   };
 
-  const filteredMeals    = meals.filter(m => m.name.toLowerCase().includes(mealFilter.toLowerCase()));
-  const filteredWorkouts = workouts.filter(w => w.name.toLowerCase().includes(workoutFilter.toLowerCase()));
-
-  const mealSuggestions    = foods.filter(f => f.type === 'meal');
-  const workoutSuggestions = foods.filter(f => f.type === 'workout');
-  const tabFoods            = foods.filter(f => f.type === foodTab).slice(0, 6);
-  const todayStr            = toYYYYMMDD(new Date());
+  const mealSuggestions = foods.filter((f) => f.type === 'meal');
+  const workoutSuggestions = foods.filter((f) => f.type === 'workout');
 
   return (
     <div className="tr-root">
@@ -158,11 +177,11 @@ export default function TrackerPage({ user, onLogout, onShowSecurity, showSecuri
               Security
             </button>
           )}
-          <button className="tr-btn tr-btn-ghost" onClick={resetAll}>
+          <button className="tr-btn tr-btn-ghost" onClick={clearDay}>
             <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
               <path d="M2 8a6 6 0 1 0 1.5-4M2 4v4h4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
-            Reset
+            Clear day
           </button>
           <button className="tr-btn tr-btn-danger" onClick={onLogout}>
             <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
@@ -185,86 +204,17 @@ export default function TrackerPage({ user, onLogout, onShowSecurity, showSecuri
           </div>
         )}
 
-        {/* ── Hero stat cards ── */}
-        <div className="tr-hero">
-          <div className="tr-stat-card accent-green">
-            <div className="tr-stat-label">Net Calories</div>
-            <div className={`tr-stat-value ${remaining < 0 ? 'danger' : ''}`}>{totalCalories}</div>
-            <div className="tr-stat-sub">of {limit} limit</div>
-          </div>
-          <div className="tr-stat-card accent-blue">
-            <div className="tr-stat-label">Consumed</div>
-            <div className="tr-stat-value">{caloriesConsumed}</div>
-            <div className="tr-stat-sub">{meals.length} meal{meals.length !== 1 ? 's' : ''}</div>
-          </div>
-          <div className="tr-stat-card accent-orange">
-            <div className="tr-stat-label">Burned</div>
-            <div className="tr-stat-value">{caloriesBurned}</div>
-            <div className="tr-stat-sub">{workouts.length} workout{workouts.length !== 1 ? 's' : ''}</div>
-          </div>
-          <div className="tr-stat-card accent-red">
-            <div className="tr-stat-label">Remaining</div>
-            <div className={`tr-stat-value ${remaining < 0 ? 'danger' : 'success'}`}>{remaining}</div>
-            <div className="tr-stat-sub">{remaining < 0 ? 'over limit' : 'to goal'}</div>
-          </div>
-        </div>
+        <DayNav selectedDate={selectedDate} onChange={setSelectedDate} />
 
-        {/* ── Progress bar ── */}
-        <div className="tr-progress-wrap">
-          <div className="tr-progress-header">
-            <span className="tr-progress-title">Daily Progress</span>
-            <span className="tr-progress-pct">{Math.round(progressPercent)}%</span>
-          </div>
-          <div className="tr-progress-track">
-            <div
-              className={`tr-progress-bar ${remaining < 0 ? 'bad' : 'ok'}`}
-              style={{ width: `${progressPercent}%` }}
-            />
-          </div>
-        </div>
+        <HeroStats
+          consumed={caloriesConsumed}
+          burned={caloriesBurned}
+          limit={limit}
+          mealCount={meals.length}
+          workoutCount={workouts.length}
+        />
 
-        {/* ── This Week panel ── */}
-        {stats && (
-          <div className="tr-panel tr-stats-panel">
-            <div className="tr-panel-head">
-              <span className="tr-panel-title">Your Week</span>
-              <div className="tr-streak-chips">
-                <span className="tr-chip">Streak {stats.streak.current} day{stats.streak.current === 1 ? '' : 's'}</span>
-                <span className="tr-chip tr-chip-dim">Best {stats.streak.best}</span>
-              </div>
-            </div>
-            <div className="tr-panel-body">
-              <div className="tr-week-chart">
-                {stats.days.map((day) => (
-                  <DayBar key={day.date} day={day} isToday={day.date === todayStr} />
-                ))}
-              </div>
-
-              <div className="tr-week-foot">
-                <span>
-                  Week: <b>{stats.week.consumed}</b> consumed · <b>{stats.week.burned}</b> burned ·{' '}
-                  <b className={stats.week.net < 0 ? 'danger' : ''}>{stats.week.net}</b> net
-                </span>
-                <span className={stats.week.daysUnderLimit >= 5 ? 'tr-goal-ok' : ''}>
-                  {stats.week.daysUnderLimit}/7 days under limit
-                </span>
-              </div>
-
-              {stats.bestDay && (
-                <div className="tr-bestday">
-                  Best day this week: <b>{stats.bestDay.label}</b> — stayed{' '}
-                  <b>{stats.bestDay.underBy} kcal</b> under your limit
-                </div>
-              )}
-
-              <div className="tr-badges">
-                {stats.badges.map((badge) => (
-                  <BadgeTile key={badge.id} badge={badge} />
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
+        <WeekPanel stats={stats} selectedDate={selectedDate} />
 
         {/* ── Two-column body ── */}
         <div className="tr-cols">
@@ -321,264 +271,41 @@ export default function TrackerPage({ user, onLogout, onShowSecurity, showSecuri
               </div>
             </div>
 
-            {/* My Foods library */}
-            <div className="tr-panel">
-              <div className="tr-panel-head tr-foods-head">
-                <span className="tr-panel-title">My Foods</span>
-                <div className="tr-tabs">
-                  <button
-                    className={`tr-tab ${foodTab === 'meal' ? 'active' : ''}`}
-                    onClick={() => setFoodTab('meal')}
-                  >
-                    Meals
-                  </button>
-                  <button
-                    className={`tr-tab ${foodTab === 'workout' ? 'active' : ''}`}
-                    onClick={() => setFoodTab('workout')}
-                  >
-                    Workouts
-                  </button>
-                </div>
-              </div>
-              <div className="tr-list-body tr-foods-body">
-                {loading ? (
-                  <div className="tr-spinner-wrap"><div className="tr-spinner" /></div>
-                ) : tabFoods.length === 0 ? (
-                  <div className="tr-empty">
-                    No saved {foodTab}s yet. Add one above and it'll be saved here for instant re-use.
-                  </div>
-                ) : (
-                  tabFoods.map((food) => (
-                    <div className="tr-item" key={food.id}>
-                      <span className="tr-item-name">{food.name}</span>
-                      <div className="tr-item-right">
-                        <span className={`tr-badge tr-badge-${food.type}`}>{food.calories} kcal</span>
-                        <button
-                          className="tr-add-mini"
-                          onClick={() => addItem(food.type, food.name, food.calories)}
-                          title="Quick add today"
-                        >
-                          +
-                        </button>
-                        <button className="tr-del-btn" onClick={() => deleteFood(food.id)} title="Remove from library">
-                          <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
-                            <path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-                          </svg>
-                        </button>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
+            <FoodLibrary
+              foods={foods}
+              loading={loading}
+              foodTab={foodTab}
+              onTabChange={setFoodTab}
+              onQuickAdd={(food) => addItem(food.type, food.name, food.calories)}
+              onDelete={deleteFood}
+            />
           </div>
 
           {/* Right — lists */}
           <div>
-            <div className="tr-panel">
-              <div className="tr-list-head">
-                <span className="tr-panel-title">Meals</span>
-                <input
-                  type="text"
-                  className="tr-filter-input"
-                  placeholder="Search meals…"
-                  value={mealFilter}
-                  onChange={(e) => setMealFilter(e.target.value)}
-                />
-              </div>
-              <div className="tr-list-body">
-                {loading ? (
-                  <div className="tr-spinner-wrap"><div className="tr-spinner" /></div>
-                ) : filteredMeals.length === 0 ? (
-                  <div className="tr-empty">No meals yet — add one above.</div>
-                ) : (
-                  filteredMeals.map((meal) => (
-                    <ItemRow
-                      key={meal.id}
-                      item={meal}
-                      type="meal"
-                      onDelete={() => deleteItem(meal.id, 'meal')}
-                    />
-                  ))
-                )}
-              </div>
-            </div>
+            <EntryList
+              title="Meals"
+              type="meal"
+              items={meals}
+              loading={loading}
+              emptyHint="No meals yet for this day — add one on the left."
+              onDelete={deleteItem}
+              onEdit={editItem}
+            />
 
-            <div className="tr-panel">
-              <div className="tr-list-head">
-                <span className="tr-panel-title">Workouts</span>
-                <input
-                  type="text"
-                  className="tr-filter-input"
-                  placeholder="Search workouts…"
-                  value={workoutFilter}
-                  onChange={(e) => setWorkoutFilter(e.target.value)}
-                />
-              </div>
-              <div className="tr-list-body">
-                {loading ? (
-                  <div className="tr-spinner-wrap"><div className="tr-spinner" /></div>
-                ) : filteredWorkouts.length === 0 ? (
-                  <div className="tr-empty">No workouts yet — add one above.</div>
-                ) : (
-                  filteredWorkouts.map((workout) => (
-                    <ItemRow
-                      key={workout.id}
-                      item={workout}
-                      type="workout"
-                      onDelete={() => deleteItem(workout.id, 'workout')}
-                    />
-                  ))
-                )}
-              </div>
-            </div>
+            <EntryList
+              title="Workouts"
+              type="workout"
+              items={workouts}
+              loading={loading}
+              emptyHint="No workouts yet for this day — add one on the left."
+              onDelete={deleteItem}
+              onEdit={editItem}
+            />
           </div>
 
         </div>
       </div>
     </div>
-  );
-}
-
-function ItemForm({ label, suggestions = [], onAdd }) {
-  const [name, setName] = useState('');
-  const [calories, setCalories] = useState('');
-  const [showSug, setShowSug] = useState(false);
-
-  const matches = useMemo(
-    () =>
-      suggestions
-        .filter((s) => s.name.toLowerCase().includes(name.trim().toLowerCase()))
-        .slice(0, 5),
-    [suggestions, name]
-  );
-
-  const handleSubmit = (e) => {
-    e.preventDefault();
-    if (!name.trim() || !calories) return;
-    onAdd(name.trim(), Number(calories));
-    setName('');
-    setCalories('');
-    setShowSug(false);
-  };
-
-  const pick = (s) => {
-    setName(s.name);
-    setCalories(s.calories);
-    setShowSug(false);
-  };
-
-  return (
-    <div className="tr-form">
-      <form onSubmit={handleSubmit}>
-        <div className="tr-form-row">
-          <input
-            type="text"
-            className="tr-input name"
-            placeholder={`${label} name`}
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            onFocus={() => setShowSug(true)}
-            onBlur={() => setShowSug(false)}
-            required
-          />
-          <input
-            type="number"
-            className="tr-input cal"
-            placeholder="kcal"
-            value={calories}
-            onChange={(e) => setCalories(e.target.value)}
-            required
-            min={0}
-          />
-          <button className="tr-btn tr-btn-primary" type="submit">
-            Add
-          </button>
-        </div>
-      </form>
-
-      {showSug && name.trim() && matches.length > 0 && (
-        <div className="tr-suggest">
-          {matches.map((s) => (
-            <button
-              type="button"
-              key={s.id}
-              className="tr-suggest-item"
-              onMouseDown={(e) => {
-                e.preventDefault();
-                pick(s);
-              }}
-            >
-              <span className="tr-suggest-name">{s.name}</span>
-              <span className="tr-suggest-cal">{s.calories} kcal</span>
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ItemRow({ item, type, onDelete }) {
-  return (
-    <div className="tr-item">
-      <span className="tr-item-name">{item.name}</span>
-      <div className="tr-item-right">
-        <span className={`tr-badge tr-badge-${type}`}>{item.calories} kcal</span>
-        <button className="tr-del-btn" onClick={onDelete} title="Delete">
-          <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
-            <path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-          </svg>
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function DayBar({ day, isToday }) {
-  const height = day.limit > 0 ? clamp((day.consumed / day.limit) * 100, 3, 100) : 3;
-  return (
-    <div className={`tr-daycol ${day.underLimit ? 'under' : 'over'} ${isToday ? 'today' : ''}`}>
-      <div className="tr-daynet">{day.net}</div>
-      <div className="tr-daytrack">
-        <div className="tr-daybar" style={{ height: `${height}%` }} />
-      </div>
-      <div className="tr-daylabel">{day.label}</div>
-      {isToday && <div className="tr-daytoday">today</div>}
-    </div>
-  );
-}
-
-function BadgeTile({ badge }) {
-  return (
-    <div
-      className={`tr-badge-tile ${badge.earned ? 'earned' : 'locked'}`}
-      title={badge.desc}
-    >
-      <div className="tr-badge-icon">
-        <BadgeIcon icon={badge.icon} />
-      </div>
-      <div className="tr-badge-name">{badge.name}</div>
-      <div className="tr-badge-desc">{badge.desc}</div>
-    </div>
-  );
-}
-
-function BadgeIcon({ icon }) {
-  const paths = {
-    star:   ['M10 2l2.5 5 5.5.5-4 4 1 5.5L10 14l-5 3 1-5.5-4-4 5.5-.5z'],
-    bolt:   ['M9 2l-6 8h5l-1 8 6-10h-5z'],
-    target: ['M10 4a6 6 0 1 0 0 12 6 6 0 0 0 0-12zM10 7a3 3 0 1 1 0 6 3 3 0 0 1 0-6z'],
-    flame:  ['M12 2c1 4-3 5-3 9a3 3 0 0 0 6 0c2 2 3 4 3 7a8 8 0 1 1-16 0c0-5 3.5-7 5-10 .6 2 1.5 3 3 3 0-3-1-6 2-9z'],
-    flag:   ['M5 20V3.5M5 4c4-2 7 2 11 0v8c-4 2-7-2-11 0'],
-    trophy: ['M8 21h8M12 17v4M7 4h10v5a5 5 0 0 1-10 0zM7 6H4a3 3 0 0 0 3 3M17 6h3a3 3 0 0 1-3 3'],
-    shield: ['M12 2l7 3v6c0 5-3 8-7 11-4-3-7-6-7-11V5zM9 12l2 2 4-4'],
-  };
-  return (
-    <svg width="16" height="16" viewBox="0 0 20 20" fill="none">
-      {(paths[icon] || paths.star).map((d, i) => (
-        <path key={i} d={d} fill="currentColor" fillRule={icon === 'target' ? 'evenodd' : 'nonzero'} />
-      ))}
-    </svg>
   );
 }
